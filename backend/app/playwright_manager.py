@@ -1,23 +1,27 @@
-# app/playwright_manager.py (SYNC - your original)
+# app/playwright_manager.py (SYNC)
 from playwright.sync_api import sync_playwright
 
 
-playwright_instance = None
-context = None
+# Global browser (shared across all instances)
+_browser = None
+_context = None
 
 
 def start_browser():
-    global playwright_instance, context
-    if context is not None:
-        return context
-    playwright_instance = sync_playwright().start()
-    context = playwright_instance.chromium.launch_persistent_context(
+    """Start browser once, share context across all instances"""
+    global _browser, _context  # ← ADD THIS LINE
+    
+    if _context is not None:
+        return _context
+    
+    _browser = sync_playwright().start()
+    _context = _browser.chromium.launch_persistent_context(
         user_data_dir="./chrome_profile",
         headless=False,
         viewport={"width": 1600, "height": 900}
     )
     print("Chrome started with persistent profile")
-    return context
+    return _context
 
 
 def inject_slot_overlay(page, label: str):
@@ -48,22 +52,33 @@ def inject_slot_overlay(page, label: str):
 
 
 def create_tabs(symbol: str, timeframes: list[str]) -> dict:
+    """Create NEW pages for each instance"""
     context = start_browser()
     tabs = {}
+    
     for timeframe in timeframes:
+        # Create a NEW page for this instance
         page = context.new_page()
+        
+        # Navigate to TradingView chart
         page.goto(f"https://www.tradingview.com/chart/?symbol={symbol}", timeout=60000)
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(5000)  # let chart load
+        
+        # Add overlay label
         inject_slot_overlay(page, f"SLOT: {timeframe}")
+        
         tabs[timeframe] = page
-        print(f"Opened tab for {timeframe}")
+        print(f"Opened tab for {timeframe} (instance: {symbol})")
+    
     return tabs
 
 
 def close_browser():
-    global context, playwright_instance
-    if context:
-        context.close()
-    if playwright_instance:
-        playwright_instance.stop()
+    """Close browser when shutting down"""
+    global _context, _browser  # ← ADD THIS TOO
+    
+    if _context:
+        _context.close()
+    if _browser:
+        _browser.stop()
     print("Browser closed")

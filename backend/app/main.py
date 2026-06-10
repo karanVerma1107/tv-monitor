@@ -11,7 +11,7 @@ from app.runtime import instances, active_instances
 from app.playwright_manager import create_tabs
 from app.ws_manager import connect, disconnect, broadcast
 
-
+#uvicorn app.main:app --reload --port 8000
 # ----------------------------
 # SCRAPER CORE
 # ----------------------------

@@ -270,25 +270,94 @@ Just ensure your PineScript exposes values with matching titles.
 TradingView indicator must expose values with exact titles:
 
 ```javascript
-// @version=5
-indicator("EMA Crossover Strategy", overlay=true)
+//@version=5
+strategy("EMA 9/21 Crossover Strategy",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     calc_on_every_tick=true,
+     process_orders_on_close=false)
 
-// EMAs
-ema9 = ta.ema(close, 9)
-ema21 = ta.ema(close, 21)
+// --- Inputs ---
+src = input.source(close, title="Source")
+fast_length = input.int(9, title="Fast EMA Length")
+slow_length = input.int(21, title="Slow EMA Length")
 
-// Signals
-buySignal = ema9 > ema21 ? 1 : 0
-sellSignal = ema9 < ema21 ? 1 : 0
+// --- Calculations ---
+fast_ema = ta.ema(src, fast_length)
+slow_length_ema = ta.ema(src, slow_length)
 
-// Plot with exact titles (match fieldsToScrape)
-plot(ema9, "Fast EMA (9)", color=color.blue)
-plot(ema21, "Slow EMA (21)", color=color.red)
-plot(buySignal, "Buy Signal", color=color.green)
-plot(sellSignal, "Sell Signal", color=color.orange)
+// --- Plotting EMAs ---
+plot(fast_ema,
+     color=color.blue,
+     title="Fast EMA (9)",
+     linewidth=2)
 
-// Close price (auto-extracted as "C")
-plot(close, "C", color=color.white)
+plot(slow_length_ema,
+     color=color.orange,
+     title="Slow EMA (21)",
+     linewidth=2)
+
+// --- Crossover Conditions ---
+longCondition = ta.crossover(fast_ema, slow_length_ema)
+shortCondition = ta.crossunder(fast_ema, slow_length_ema)
+
+// --------------------------------------------------
+// EXACT EVENT TIMESTAMPS
+// --------------------------------------------------
+
+buy_timestamp = longCondition ? timenow : na
+sell_timestamp = shortCondition ? timenow : na
+crossing_timestamp = (longCondition or shortCondition) ? timenow : na
+
+plot(buy_timestamp,
+     title="Buy Timestamp",
+     display=display.none)
+
+plot(sell_timestamp,
+     title="Sell Timestamp",
+     display=display.none)
+
+plot(crossing_timestamp,
+     title="Crossing Timestamp",
+     display=display.none)
+
+// --- Execution Logic ---
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Sell", strategy.short)
+
+// --- Visual Signals ---
+plotshape(series=longCondition,
+     title="Buy Signal",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=color.green,
+     size=size.small,
+     text="BUY",
+     textcolor=color.green)
+
+plotshape(series=shortCondition,
+     title="Sell Signal",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=color.red,
+     size=size.small,
+     text="SELL",
+     textcolor=color.red)
+
+// --- Background Coloring ---
+bg_color =
+     strategy.position_size > 0
+     ? color.new(color.green, 95)
+     : strategy.position_size < 0
+     ? color.new(color.red, 95)
+     : na
+
+bgcolor(bg_color)
 ```
 
 Important: Titles in plot() must match exactly with fieldsToScrape array.

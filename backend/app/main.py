@@ -1,7 +1,9 @@
 import asyncio
 import time
 from contextlib import asynccontextmanager
-
+import csv
+import os
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from uuid import uuid4
@@ -11,7 +13,116 @@ from app.runtime import instances, active_instances
 from app.playwright_manager import create_tabs
 from app.ws_manager import connect, disconnect, broadcast
 
-#uvicorn app.main:app --reload --port 8000
+# to run file: uvicorn app.main:app --reload --port 8000
+# ----------------------------
+# CSV SETUP (Simplified for 1 instance, 2 timeframes)
+# ----------------------------
+
+
+CSV_FILE = "scraper_data.csv"
+
+
+def init_csv():
+    """Initialize CSV with headers if file doesn't exist"""
+    if not os.path.exists(CSV_FILE):
+        headers = [
+            "symbol",
+            "tv_timestamp",
+            "C",
+            "5m_EMA9",
+            "5m_EMA21",
+            "5m_Trend",
+            "5m_Buy",
+            "5m_Sell",
+            "15m_EMA9",
+            "15m_EMA21",
+            "15m_Trend",
+            "15m_Buy",
+            "15m_Sell"
+        ]
+        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+
+def save_to_csv(snapshot: dict, instance: dict):
+    """Save scraping data to CSV ONLY when trading values change (ignore timestamp)"""
+    init_csv()
+    
+    data = snapshot.get("data", {})
+    
+    # Get values for 5m
+    tf_5m = data.get("5m", {})
+    ema9_5m = tf_5m.get("Fast EMA (9)") or ""
+    ema21_5m = tf_5m.get("Slow EMA (21)") or ""
+    trend_5m = tf_5m.get("trend") or ""
+    buy_5m = tf_5m.get("Buy Signal") or ""
+    sell_5m = tf_5m.get("Sell Signal") or ""
+    
+    # Get values for 15m
+    tf_15m = data.get("15m", {})
+    ema9_15m = tf_15m.get("Fast EMA (9)") or ""
+    ema21_15m = tf_15m.get("Slow EMA (21)") or ""
+    trend_15m = tf_15m.get("trend") or ""
+    buy_15m = tf_15m.get("Buy Signal") or ""
+    sell_15m = tf_15m.get("Sell Signal") or ""
+    
+    # Get C (price)
+    c_value = tf_5m.get("C") or tf_15m.get("C") or ""
+    
+    # Build current row (WITHOUT timestamp for comparison)
+    current_values = [
+        snapshot.get("symbol") or instance.get("symbol"),  # col 0: symbol
+        c_value,  # col 2: C
+        ema9_5m,  # col 3: 5m_EMA9
+        ema21_5m,  # col 4: 5m_EMA21
+        trend_5m,  # col 5: 5m_Trend
+        buy_5m,  # col 6: 5m_Buy
+        sell_5m,  # col 7: 5m_Sell
+        ema9_15m,  # col 8: 15m_EMA9
+        ema21_15m,  # col 9: 15m_EMA21
+        trend_15m,  # col 10: 15m_Trend
+        buy_15m,  # col 11: 15m_Buy
+        sell_15m,  # col 12: 15m_Sell
+    ]
+    
+    # Full row for CSV (WITH timestamp)
+    full_row = [
+        snapshot.get("symbol") or instance.get("symbol"),
+        snapshot.get("timestamp"),  # timestamp (ignored in comparison)
+        c_value,
+        ema9_5m,
+        ema21_5m,
+        trend_5m,
+        buy_5m,
+        sell_5m,
+        ema9_15m,
+        ema21_15m,
+        trend_15m,
+        buy_15m,
+        sell_15m,
+    ]
+    
+    if "last_saved_values" not in instance:
+        # First run - always save
+        instance["last_saved_values"] = current_values
+        with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(full_row)
+    else:
+        # Compare WITHOUT timestamp
+        last_values = instance["last_saved_values"]
+        
+        changed = False
+        for i in range(len(current_values)):
+            if current_values[i] != last_values[i]:
+                changed = True
+                break
+        
+        if changed:
+            instance["last_saved_values"] = current_values
+            with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(full_row)
 # ----------------------------
 # SCRAPER CORE
 # ----------------------------
@@ -72,23 +183,45 @@ async def scrape_page(page, fields_to_scrape):
     return data
 
 
-def compute_trend(data):
+def compute_trend(data, prev_trend=None):
     """
-    Calculate trend from EMAs ONLY.
-    No HOLD logic - just BUY if fast > slow, SELL if fast <= slow
+    Calculate trend:
+    1. On first run (prev_trend=None): use EMAs to determine initial trend
+    2. After that: trend changes ONLY on BUY/SELL signal
+    3. If both signals = 0: keep previous trend (HOLD)
+    
+    Returns: "BULLISH" or "BEARISH"
     """
     fast = data.get("Fast EMA (9)")
     slow = data.get("Slow EMA (21)")
+    buy = data.get("Buy Signal")
+    sell = data.get("Sell Signal")
 
-    try:
-        if fast and slow:
-            fast_val = float(fast)
-            slow_val = float(slow)
-            return "BUY" if fast_val > slow_val else "SELL"
-    except:
-        pass
-    
-    return "UNKNOWN"
+    # INIT: Calculate from EMAs when prev_trend is None
+    if prev_trend is None:
+        try:
+            if fast and slow:
+                fast_val = float(fast)
+                slow_val = float(slow)
+                return "BULLISH" if fast_val > slow_val else "BEARISH"
+        except:
+            pass
+        return "UNKNOWN"
+
+    # Signal values (check for "1" or 1)
+    buy_active = buy in ("1", "1.00000", 1, 1.0, "1.0")
+    sell_active = sell in ("1", "1.00000", 1, 1.0, "1.0")
+
+    # BUY signal active → BULLISH
+    if buy_active:
+        return "BULLISH"
+
+    # SELL signal active → BEARISH
+    if sell_active:
+        return "BEARISH"
+
+    # Both signals = 0 → HOLD (keep previous trend)
+    return prev_trend
 
 
 # ----------------------------
@@ -112,9 +245,8 @@ async def process_instance(instance):
     # Initialize trend_state on first run (when instance starts)
     if "trend_state" not in instance:
         instance["trend_state"] = {}
-        # Calculate initial trend from EMAs for all timeframes
         for timeframe in instance["timeframes"]:
-            instance["trend_state"][timeframe] = None  # Will compute on first data
+            instance["trend_state"][timeframe] = None
 
     snapshot = {
         "timestamp": time.strftime("%H:%M:%S UTC", time.gmtime()),
@@ -129,10 +261,9 @@ async def process_instance(instance):
         try:
             data = await scrape_page(page, instance["fieldsToScrape"])
             
-            # Recalculate trend EVERY time from EMAs
-            trend = compute_trend(data)
+            prev = instance["trend_state"].get(timeframe)
+            trend = compute_trend(data, prev)
             
-            # Update trend_state
             instance["trend_state"][timeframe] = trend
 
             snapshot["data"][timeframe] = {
@@ -147,7 +278,11 @@ async def process_instance(instance):
             }
 
     instance["latest_data"] = snapshot
-    # Send data via WebSocket (includes trend)
+    
+    # Save to CSV
+    save_to_csv(snapshot, instance)
+    
+    # Send data via WebSocket
     await broadcast(instance["id"], snapshot)
 
 
@@ -159,6 +294,9 @@ async def process_instance(instance):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Scraper engine starting...")
+    init_csv()
+    print(f"📁 CSV file initialized: {CSV_FILE}")
+    
     task = asyncio.create_task(scraper_loop())
     yield
     print("🛑 Shutting down scraper...")
@@ -293,3 +431,23 @@ def confirm_instance(instance_id: str):
         "instanceId": instance_id,
         "status": "RUNNING"
     }
+
+
+# ----------------------------
+# DOWNLOAD CSV
+# ----------------------------
+
+
+@app.get("/api/download-csv")
+def download_csv():
+    """Download CSV file"""
+    from fastapi.responses import FileResponse
+    
+    if not os.path.exists(CSV_FILE):
+        raise HTTPException(404, "No data available")
+    
+    return FileResponse(
+        path=CSV_FILE,
+        filename="scraper_data.csv",
+        media_type="text/csv"
+    )
